@@ -17,6 +17,12 @@ import pystray
 from PIL import Image, ImageDraw
 import sys
 import threading as th
+import mss
+
+with mss.mss() as sct:
+    for i, mon in enumerate(sct.monitors[1:], 1):  # Skip virtual screen (index 0)
+        print(f"Monitor {i}: {mon['width']}x{mon['height']} at ({mon['left']},{mon['top']})")
+
 
 # Global control
 is_recording = False
@@ -29,14 +35,18 @@ show_cursor = True  # NEW: Track cursor visibility state
 
 CONFIG_FILE = Path.home() / ".screen_recorder_config.json"
 
-# --- Helper Functions ---
 def get_monitors():
     try:
-        monitors = screeninfo.get_monitors()
-        return [(i, m) for i, m in enumerate(monitors)]
+        with mss.mss() as sct:
+            # Skip index 0 (virtual screen), start from index 1 for individual monitors
+            monitors = [(i-1, mon) for i, mon in enumerate(sct.monitors[1:], 1)]
+            print("[+] Detected monitors:", [(i+1, mon['width'], mon['height'], mon['left'], mon['top']) for i, mon in monitors])
+            return monitors
     except Exception as e:
         print(f"[-] Error getting monitors: {e}")
         return []
+
+
 
 def convert_to_twitter_format(input_path):
     output_path = input_path.with_name(input_path.stem + "_twitter.mp4")
@@ -183,12 +193,13 @@ def select_monitor_dialog():
     monitors = get_monitors()
     
     if not monitors:
-        messagebox.showerror("Error", "No monitors detected!")
+        messagebox.showerror("Error", "No monitors detected! Please check your display settings or try restarting the application.")
+        print("[-] No monitors detected in select_monitor_dialog")
         return
     
     dialog = tk.Toplevel(root)
     dialog.title("Select Monitor")
-    dialog.geometry("300x150")
+    dialog.geometry("400x200")  # Increased size for better visibility
     dialog.resizable(False, False)
     dialog.transient(root)
     dialog.grab_set()
@@ -197,32 +208,49 @@ def select_monitor_dialog():
     
     monitor_var = tk.StringVar(value="0")
     for i, monitor in monitors:
-        tk.Radiobutton(dialog, text=f"Monitor {i+1}: {monitor.width}x{monitor.height} at ({monitor.x},{monitor.y})",
-                      variable=monitor_var, value=str(i)).pack(anchor='w', padx=20)
+        monitor_dict = monitor  # monitor is already the tuple (index, monitor_dict)
+        tk.Radiobutton(dialog, 
+                       text=f"Monitor {i+1}: {monitor_dict['width']}x{monitor_dict['height']} at ({monitor_dict['left']},{monitor_dict['top']})",
+                       variable=monitor_var, 
+                       value=str(i),
+                       font=('Arial', 9)).pack(anchor='w', padx=20, pady=2)
     
     def confirm():
         global selected_monitor, record_region
-        selected_monitor = int(monitor_var.get())
-        record_region = None
-        dialog.destroy()
-        root.deiconify()
-        update_region_label()
-        save_config(save_path, replace_mode, record_region, selected_monitor, show_cursor)  # NEW: Added show_cursor
-        monitor = monitors[selected_monitor][1]
-        messagebox.showinfo("Monitor Selected", f"Recording set to Monitor {selected_monitor+1}: {monitor.width}x{monitor.height}")
+        try:
+            selected_monitor = int(monitor_var.get())
+            record_region = None
+            dialog.destroy()
+            root.deiconify()
+            update_region_label()
+            save_config(save_path, replace_mode, record_region, selected_monitor, show_cursor)
+            monitor = monitors[selected_monitor][1]
+            messagebox.showinfo("Monitor Selected", 
+                               f"Recording set to Monitor {selected_monitor+1}: {monitor['width']}x{monitor['height']}")
+        except (ValueError, IndexError) as e:
+            messagebox.showerror("Error", f"Invalid monitor selection: {e}")
+            dialog.destroy()
+            root.deiconify()
     
-    tk.Button(dialog, text="Confirm", command=confirm).pack(pady=10)
-    tk.Button(dialog, text="Cancel", command=lambda: dialog.destroy() or root.deiconify()).pack(pady=5)
+    tk.Button(dialog, text="Confirm", command=confirm, bg="lightgreen").pack(pady=10)
+    tk.Button(dialog, text="Cancel", command=lambda: dialog.destroy() or root.deiconify(), bg="lightcoral").pack(pady=5)
 
+
+                      
 def update_region_label():
     if selected_monitor is not None:
-        monitor = get_monitors()[selected_monitor][1]
-        region_label.config(text=f"Region: Monitor {selected_monitor+1} ({monitor.width}x{monitor.height} at {monitor.x},{monitor.y})")
+        try:
+            monitor = get_monitors()[selected_monitor][1]
+            region_label.config(text=f"Region: Monitor {selected_monitor+1} ({monitor['width']}x{monitor['height']} at {monitor['left']},{monitor['top']})")
+        except IndexError:
+            region_label.config(text="Region: Invalid monitor selection")
     elif record_region:
         x, y, w, h = record_region
         region_label.config(text=f"Region: {w}x{h} at ({x},{y})")
     else:
         region_label.config(text="Region: Full Screen (auto)")
+
+
 
 def clear_region():
     global record_region, selected_monitor
@@ -251,78 +279,107 @@ def record_screen(duration, fps=30):
             status_label.config(text=f"Deleted {deleted_count} old recordings...")
             time.sleep(1)
 
-    was_visible = root.winfo_viewable()
+    was_visible = root.winfo_viewable() if 'root' in globals() else False
     if was_visible:
         root.withdraw()
         print("[+] Window hidden during recording")
 
-    if selected_monitor is not None:
-        monitor = get_monitors()[selected_monitor][1]
-        x, y, width, height = monitor.x, monitor.y, monitor.width, monitor.height
-        print(f"[+] Recording monitor {selected_monitor+1}: {width}x{height} at ({x},{y})")
-    elif record_region:
-        x, y, width, height = record_region
-        print(f"[+] Recording region: {width}x{height} at ({x},{y})")
-    else:
-        screen_size = pyautogui.size()
-        x, y = 0, 0
-        width = min(screen_size[0], 1920)
-        height = min(screen_size[1], 1080)
-        print(f"[+] Recording primary screen: {width}x{height}")
+    # Initialize mss
+    with mss.mss() as sct:
+        if selected_monitor is not None:
+            try:
+                monitor = get_monitors()[selected_monitor][1]
+                x, y, width, height = monitor['left'], monitor['top'], monitor['width'], monitor['height']
+                print(f"[+] Recording monitor {selected_monitor+1}: {width}x{height} at ({x},{y})")
+                if width <= 0 or height <= 0:
+                    raise ValueError("Invalid monitor dimensions")
+                mon = {"left": x, "top": y, "width": width, "height": height}
+            except (IndexError, ValueError) as e:
+                print(f"[-] Error with monitor selection: {e}")
+                status_label.config(text="Error: Invalid monitor selection")
+                if was_visible:
+                    root.deiconify()
+                return
+        elif record_region:
+            x, y, width, height = record_region
+            print(f"[+] Recording region: {width}x{height} at ({x},{y})")
+            mon = {"left": x, "top": y, "width": width, "height": height}
+        else:
+            screen_size = sct.monitors[0]  # Primary monitor
+            x, y = 0, 0
+            width = min(screen_size["width"], 1920)
+            height = min(screen_size["height"], 1080)
+            print(f"[+] Recording primary screen: {width}x{height}")
+            mon = {"left": x, "top": y, "width": width, "height": height}
 
-    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-    filename = save_path / f"screen_record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
-    out = cv2.VideoWriter(str(filename), fourcc, fps, (width, height))
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        filename = save_path / f"screen_record_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        out = cv2.VideoWriter(str(filename), fourcc, fps, (width, height))
 
-    is_recording = True
-    stop_flag = False
-    status_text = f"Recording {'monitor ' + str(selected_monitor+1) if selected_monitor is not None else 'region' if record_region else 'primary screen'}..."
-    status_label.config(text=status_text)
+        is_recording = True
+        stop_flag = False
+        status_text = f"Recording {'monitor ' + str(selected_monitor+1) if selected_monitor is not None else 'region' if record_region else 'primary screen'}..."
+        status_label.config(text=status_text)
 
-    start_time = time.time()
+        start_time = time.time()
+        frame_interval = 1.0 / fps  # Time per frame in seconds
+        next_frame_time = start_time
 
-    try:
-        while time.time() - start_time < duration:
-            if stop_flag:
-                break
-            img = pyautogui.screenshot(region=(x, y, width, height))
-            frame = cv2.cvtColor(np.array(img), cv2.COLOR_BGR2RGB)
-            
-            # NEW: Draw cursor if show_cursor is True
-            if show_cursor:
-                try:
-                    cursor_x, cursor_y = pyautogui.position()
-                    # Adjust cursor coordinates to be relative to the recording region
-                    rel_x = cursor_x - x
-                    rel_y = cursor_y - y
-                    if 0 <= rel_x < width and 0 <= rel_y < height:
-                        # Draw a simple cursor (e.g., white circle with black outline)
-                        cv2.circle(frame, (rel_x, rel_y), 5, (0, 0, 0), 1)  # Black outline
-                        cv2.circle(frame, (rel_x, rel_y), 3, (255, 255, 255), -1)  # White fill
-                except Exception as e:
-                    print(f"[-] Error drawing cursor: {e}")
+        try:
+            while time.time() - start_time < duration:
+                if stop_flag:
+                    break
 
-            out.write(frame)
-            time.sleep(1 / fps)
-    except Exception as e:
-        print(f"[-] Recording error: {e}")
-    finally:
-        out.release()
-        is_recording = False
-        if was_visible:
-            root.deiconify()
-            root.state('normal')
-            root.lift()
-            print("[+] Window restored after recording")
+                current_time = time.time()
+                if current_time >= next_frame_time:
+                    # Capture screen using mss
+                    img = sct.grab(mon)
+                    frame = np.array(img)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)  # Convert BGRA to BGR
 
-    status_label.config(text="Encoding for Twitter...")
-    twitter_file = convert_to_twitter_format(filename)
-    last_recorded_file = twitter_file
+                    # Draw cursor if show_cursor is True
+                    if show_cursor:
+                        try:
+                            cursor_x, cursor_y = pyautogui.position()
+                            # Adjust cursor coordinates to be relative to the recording region
+                            rel_x = cursor_x - x
+                            rel_y = cursor_y - y
+                            if 0 <= rel_x < width and 0 <= rel_y < height:
+                                # Draw a simple cursor (white circle with black outline)
+                                cv2.circle(frame, (rel_x, rel_y), 5, (0, 0, 0), 1)  # Black outline
+                                cv2.circle(frame, (rel_x, rel_y), 3, (255, 255, 255), -1)  # White fill
+                        except Exception as e:
+                            print(f"[-] Error drawing cursor: {e}")
 
-    mode_text = " (Replace Mode)" if replace_mode else ""
-    region_text = f" (Monitor {selected_monitor+1})" if selected_monitor is not None else " (Region)" if record_region else " (Primary Screen)"
-    status_label.config(text=f"Saved Twitter-ready{mode_text}{region_text}:\n{twitter_file}")
-    print(f"[+] Saved Twitter-ready: {twitter_file}")
+                    out.write(frame)
+                    next_frame_time += frame_interval
+
+                    # If we're behind schedule, skip frames to catch up
+                    if next_frame_time < current_time:
+                        next_frame_time = current_time + frame_interval
+
+                # Small sleep to prevent busy-waiting
+                time.sleep(max(0, next_frame_time - time.time()))
+        except Exception as e:
+            print(f"[-] Recording error: {e}")
+            status_label.config(text=f"Recording error: {e}")
+        finally:
+            out.release()
+            is_recording = False
+            if was_visible:
+                root.deiconify()
+                root.state('normal')
+                root.lift()
+                print("[+] Window restored after recording")
+
+        status_label.config(text="Encoding for Twitter...")
+        twitter_file = convert_to_twitter_format(filename)
+        last_recorded_file = twitter_file
+
+        mode_text = " (Replace Mode)" if replace_mode else ""
+        region_text = f" (Monitor {selected_monitor+1})" if selected_monitor is not None else " (Region)" if record_region else " (Primary Screen)"
+        status_label.config(text=f"Saved Twitter-ready{mode_text}{region_text}:\n{twitter_file}")
+        print(f"[+] Saved Twitter-ready: {twitter_file}")
 
 def toggle_replace_mode():
     global replace_mode
@@ -653,7 +710,7 @@ print(f"[+] Replace mode: {'ON' if replace_mode else 'OFF'}")
 print(f"[+] Cursor visibility: {'ON' if show_cursor else 'OFF'}")  # NEW
 if selected_monitor is not None:
     monitor = get_monitors()[selected_monitor][1]
-    print(f"[+] Recording monitor {selected_monitor+1}: {monitor.width}x{monitor.height} at ({monitor.x},{monitor.y})")
+    # print(f"[+] Recording monitor {selected_monitor+1}: {monitor.width}x{monitor.height} at ({monitor.x},{monitor.y})")
 elif record_region:
     x, y, w, h = record_region
     print(f"[+] Recording region: {w}x{h} at ({x},{y})")
